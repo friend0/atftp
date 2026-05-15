@@ -1,0 +1,31 @@
+[package]
+name = "atftp"
+version = "0.1.0"
+edition = "2021"
+description = "Rust clone of atftp — Advanced TFTP client and server"
+license = "GPL-2.0-or-later"
+
+[lib]
+name = "atftp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "atftp"
+path = "src/bin/atftp.rs"
+
+[[bin]]
+name = "atftpd"
+path = "src/bin/atftpd.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "io-util", "time", "sync", "signal"] }
+bytes = "1"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "1"
+anyhow = "1"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["full", "test-util"] }
