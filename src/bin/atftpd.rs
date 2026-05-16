@@ -7,7 +7,7 @@ use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
 use atftp::proto::MAX_BLOCK_SIZE;
-use atftp::server::{Config, Server};
+use atftp::server::Server;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -67,23 +67,31 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     init_tracing(args.verbose);
 
-    let cfg = Config {
-        listen: args.listen,
-        root: args.root,
-        allow_overwrite: args.allow_overwrite,
-        timeout: Duration::from_secs(args.timeout as u64),
-        retries: args.retries,
-        max_block_size: args.max_block_size,
-        allow_windowsize: !args.no_windowsize,
-    };
+    let server = Server::builder()
+        .listen(args.listen)
+        .root(args.root)
+        .allow_overwrite(args.allow_overwrite)
+        .timeout(Duration::from_secs(args.timeout as u64))
+        .retries(args.retries)
+        .max_block_size(args.max_block_size)
+        .allow_windowsize(!args.no_windowsize)
+        .bind()
+        .await
+        .context("failed to bind listener")?;
 
-    let server = Server::new(cfg);
-    let serve = server.run();
-    tokio::select! {
-        r = serve => r.context("server exited with error")?,
-        _ = tokio::signal::ctrl_c() => {
-            tracing::info!("ctrl-c, shutting down");
-        }
-    }
+    tracing::info!(
+        listen = %server.local_addr(),
+        root = %server.root().display(),
+        "atftpd ready"
+    );
+
+    let shutdown = async {
+        let _ = tokio::signal::ctrl_c().await;
+        tracing::info!("ctrl-c received");
+    };
+    server
+        .run_until(shutdown)
+        .await
+        .context("server exited with error")?;
     Ok(())
 }

@@ -9,27 +9,18 @@ use atftp::client::{Client, Options};
 use atftp::error::Error;
 use atftp::proto::Mode;
 use atftp::server::{Config, Server};
-use tokio::net::UdpSocket;
 use tokio::time::timeout;
 
 /// Spawn a server on an ephemeral port and return its bound addr plus
 /// a handle the test can use to keep the task alive (drop = abort).
 async fn spawn_server(root: PathBuf, mut cfg: Config) -> (SocketAddr, tokio::task::JoinHandle<()>) {
-    // Bind a probe socket to claim a port, then immediately drop it so
-    // the server can re-bind. There's a tiny race window but it has
-    // never bitten in practice for these short-lived tests.
-    let probe = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let addr = probe.local_addr().unwrap();
-    drop(probe);
-
-    cfg.listen = addr;
+    cfg.listen = "127.0.0.1:0".parse().unwrap();
     cfg.root = root;
-    let server = Server::new(cfg);
+    let server = Server::bind(cfg).await.unwrap();
+    let addr = server.local_addr();
     let handle = tokio::spawn(async move {
         let _ = server.run().await;
     });
-    // Give the server a moment to actually bind before clients try.
-    tokio::time::sleep(Duration::from_millis(50)).await;
     (addr, handle)
 }
 
@@ -319,6 +310,47 @@ async fn rrq_with_windowsize_only() {
         .unwrap()
         .unwrap();
     assert_eq!(read_file(&dest).await, payload);
+}
+
+#[tokio::test]
+async fn graceful_shutdown_via_run_until() {
+    // run_until should return promptly once the shutdown future resolves.
+    let dir = tempfile::tempdir().unwrap();
+    let server_root = dir.path().join("srv");
+    tokio::fs::create_dir(&server_root).await.unwrap();
+    let mut cfg = base_cfg();
+    cfg.listen = "127.0.0.1:0".parse().unwrap();
+    cfg.root = server_root;
+    let server = Server::bind(cfg).await.unwrap();
+    let addr = server.local_addr();
+
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let join = tokio::spawn(async move {
+        server
+            .run_until(async {
+                let _ = rx.await;
+            })
+            .await
+    });
+
+    // Sanity-check the server actually listens: a quick get on a
+    // nonexistent file should round-trip as FileNotFound, proving the
+    // listener is alive before we signal shutdown.
+    let client = client_with(addr, base_opts());
+    let dest = dir.path().join("nope");
+    let err = timeout(Duration::from_secs(2), client.get("nope.bin", &dest))
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert!(matches!(err, Error::Peer { .. }));
+
+    // Signal shutdown and confirm the task exits cleanly.
+    tx.send(()).unwrap();
+    let result = timeout(Duration::from_secs(2), join)
+        .await
+        .expect("server didn't shut down in time")
+        .expect("join failed");
+    result.expect("run_until returned an error");
 }
 
 #[tokio::test]

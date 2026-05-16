@@ -1,10 +1,16 @@
 //! Async TFTP server. One UDP listener accepts RRQ/WRQ; each transfer
 //! runs in its own tokio task on a fresh ephemeral socket (the "TID"
 //! per RFC 1350 §4).
+//!
+//! Library users configure a [`Server`] via [`Server::builder`], call
+//! [`ServerBuilder::bind`] to claim the listening socket and resolve
+//! the root directory, then drive it with [`Server::run`] or
+//! [`Server::run_until`] for graceful shutdown.
 
 use std::collections::VecDeque;
+use std::future::Future;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -48,29 +54,114 @@ impl Default for Config {
     }
 }
 
+/// Fluent builder for [`Server`]. The terminal `bind()` call performs
+/// the canonical-root resolution and the UDP socket bind, so any
+/// configuration error surfaces before `run` starts.
+#[derive(Clone, Debug, Default)]
+pub struct ServerBuilder {
+    cfg: Config,
+}
+
+impl ServerBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn listen(mut self, addr: SocketAddr) -> Self {
+        self.cfg.listen = addr;
+        self
+    }
+
+    pub fn root(mut self, path: impl Into<PathBuf>) -> Self {
+        self.cfg.root = path.into();
+        self
+    }
+
+    pub fn allow_overwrite(mut self, yes: bool) -> Self {
+        self.cfg.allow_overwrite = yes;
+        self
+    }
+
+    pub fn timeout(mut self, d: Duration) -> Self {
+        self.cfg.timeout = d;
+        self
+    }
+
+    pub fn retries(mut self, n: u32) -> Self {
+        self.cfg.retries = n;
+        self
+    }
+
+    pub fn max_block_size(mut self, n: u16) -> Self {
+        self.cfg.max_block_size = n;
+        self
+    }
+
+    pub fn allow_windowsize(mut self, yes: bool) -> Self {
+        self.cfg.allow_windowsize = yes;
+        self
+    }
+
+    /// Canonicalize the root and bind the listening UDP socket.
+    pub async fn bind(self) -> Result<Server> {
+        Server::bind(self.cfg).await
+    }
+}
+
+/// A bound, ready-to-run TFTP server.
 pub struct Server {
     cfg: Arc<Config>,
+    listener: UdpSocket,
+    local_addr: SocketAddr,
 }
 
 impl Server {
-    pub fn new(cfg: Config) -> Self {
-        Self { cfg: Arc::new(cfg) }
+    pub fn builder() -> ServerBuilder {
+        ServerBuilder::new()
     }
 
-    /// Run the server until cancelled. Each accepted request is
-    /// handled on a dedicated task.
-    pub async fn run(self) -> Result<()> {
-        // Verify root before binding so we fail fast on bad config.
-        let canon_root = tokio::fs::canonicalize(&self.cfg.root)
+    /// Take a pre-built [`Config`], canonicalize its root, and bind its
+    /// listening socket. Returns a [`Server`] from which the actually
+    /// bound address can be inspected before `run` begins.
+    pub async fn bind(cfg: Config) -> Result<Self> {
+        let canon_root = tokio::fs::canonicalize(&cfg.root)
             .await
             .map_err(|e| Error::Io(std::io::Error::new(e.kind(), format!("root: {e}"))))?;
-        let cfg = Arc::new(Config {
+        let cfg = Config {
             root: canon_root,
-            ..(*self.cfg).clone()
-        });
+            ..cfg
+        };
         let listener = UdpSocket::bind(cfg.listen).await?;
-        info!(listen = %cfg.listen, root = %cfg.root.display(), "atftpd listening");
+        let local_addr = listener.local_addr()?;
+        Ok(Self {
+            cfg: Arc::new(cfg),
+            listener,
+            local_addr,
+        })
+    }
 
+    pub fn local_addr(&self) -> SocketAddr {
+        self.local_addr
+    }
+
+    pub fn config(&self) -> &Config {
+        &self.cfg
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.cfg.root
+    }
+
+    /// Accept transfers forever (or until an I/O error on the listener).
+    /// Each accepted request is handled on a dedicated tokio task.
+    pub async fn run(self) -> Result<()> {
+        info!(
+            listen = %self.local_addr,
+            root = %self.cfg.root.display(),
+            "atftpd listening"
+        );
+        let listener = self.listener;
+        let cfg = self.cfg;
         let mut buf = vec![0u8; MAX_PACKET_SIZE];
         loop {
             let (n, peer) = listener.recv_from(&mut buf).await?;
@@ -81,6 +172,22 @@ impl Server {
                     error!(%peer, "transfer failed: {e}");
                 }
             });
+        }
+    }
+
+    /// Run the server, stopping cleanly when `shutdown` resolves.
+    /// In-flight transfers detach and keep their own sockets, so they
+    /// will continue to completion after the listener stops accepting.
+    pub async fn run_until<F>(self, shutdown: F) -> Result<()>
+    where
+        F: Future,
+    {
+        tokio::select! {
+            r = self.run() => r,
+            _ = shutdown => {
+                info!("shutdown signalled");
+                Ok(())
+            }
         }
     }
 }
@@ -699,5 +806,39 @@ mod tests {
         assert!(!u16_le_in_window(2, 7, 4));
         // Wrap: bn=65535, ack=2, windowsize=4 — diff = 3, true.
         assert!(u16_le_in_window(65535, 2, 4));
+    }
+
+    #[test]
+    fn builder_defaults_match_config_default() {
+        let cfg_via_builder = ServerBuilder::new().cfg;
+        let defaults = Config::default();
+        assert_eq!(cfg_via_builder.listen, defaults.listen);
+        assert_eq!(cfg_via_builder.root, defaults.root);
+        assert_eq!(cfg_via_builder.allow_overwrite, defaults.allow_overwrite);
+        assert_eq!(cfg_via_builder.timeout, defaults.timeout);
+        assert_eq!(cfg_via_builder.retries, defaults.retries);
+        assert_eq!(cfg_via_builder.max_block_size, defaults.max_block_size);
+        assert_eq!(cfg_via_builder.allow_windowsize, defaults.allow_windowsize);
+    }
+
+    #[test]
+    fn builder_setters_wire_through() {
+        let addr: SocketAddr = "127.0.0.1:6970".parse().unwrap();
+        let cfg = ServerBuilder::new()
+            .listen(addr)
+            .root("/tmp/something")
+            .allow_overwrite(true)
+            .timeout(Duration::from_millis(250))
+            .retries(11)
+            .max_block_size(1024)
+            .allow_windowsize(false)
+            .cfg;
+        assert_eq!(cfg.listen, addr);
+        assert_eq!(cfg.root, PathBuf::from("/tmp/something"));
+        assert!(cfg.allow_overwrite);
+        assert_eq!(cfg.timeout, Duration::from_millis(250));
+        assert_eq!(cfg.retries, 11);
+        assert_eq!(cfg.max_block_size, 1024);
+        assert!(!cfg.allow_windowsize);
     }
 }
