@@ -1,5 +1,8 @@
-//! Async TFTP client. One-shot get/put on a fresh ephemeral UDP socket
-//! (the client TID per RFC 1350 §4).
+//! Async TFTP client. Configure a [`Client`] (directly or via
+//! [`ClientBuilder`]) and call its `get` / `put` methods. Each transfer
+//! opens its own ephemeral UDP socket — the client TID per RFC 1350 §4 —
+//! so a single `Client` is cheap to clone and can drive many concurrent
+//! transfers to the same server.
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
@@ -41,6 +44,140 @@ impl Default for Options {
             request_tsize: false,
             retries: 5,
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS as u64),
+        }
+    }
+}
+
+/// Configured TFTP client targeting a single server.
+#[derive(Clone, Debug)]
+pub struct Client {
+    server: SocketAddr,
+    options: Options,
+}
+
+impl Client {
+    /// Construct a client with default options.
+    pub fn new(server: SocketAddr) -> Self {
+        Self {
+            server,
+            options: Options::default(),
+        }
+    }
+
+    /// Construct a client with a pre-built [`Options`] block.
+    pub fn with_options(server: SocketAddr, options: Options) -> Self {
+        Self { server, options }
+    }
+
+    /// Start a builder. Equivalent to `ClientBuilder::new()`.
+    pub fn builder() -> ClientBuilder {
+        ClientBuilder::new()
+    }
+
+    pub fn server(&self) -> SocketAddr {
+        self.server
+    }
+
+    pub fn options(&self) -> &Options {
+        &self.options
+    }
+
+    pub fn options_mut(&mut self) -> &mut Options {
+        &mut self.options
+    }
+
+    /// Download `remote` from the server, writing it to `local`. Any
+    /// existing file at `local` is truncated. Returns the number of
+    /// bytes written to disk (post-netascii decode, if applicable).
+    pub async fn get(&self, remote: &str, local: &Path) -> Result<u64> {
+        let mut receiver = Receiver::new_file(local, self.options.mode).await?;
+        do_get(&self.options, self.server, remote, &mut receiver).await
+    }
+
+    /// Upload `local` to the server as `remote`. Returns the number of
+    /// bytes sent on the wire (post-netascii encode, if applicable).
+    pub async fn put(&self, remote: &str, local: &Path) -> Result<u64> {
+        let file = File::open(local).await?;
+        let size = file.metadata().await?.len();
+        let mut sender = Sender::new(Source::File(file), self.options.mode);
+        do_put(&self.options, self.server, remote, &mut sender, Some(size)).await
+    }
+
+    /// Download `remote` and return its contents in a `Vec<u8>`.
+    pub async fn get_to_vec(&self, remote: &str) -> Result<Vec<u8>> {
+        let mut receiver = Receiver::new_vec(self.options.mode);
+        do_get(&self.options, self.server, remote, &mut receiver).await?;
+        Ok(receiver.into_vec())
+    }
+
+    /// Upload `data` to the server as `remote`.
+    pub async fn put_bytes(&self, remote: &str, data: &[u8]) -> Result<u64> {
+        let len = data.len() as u64;
+        let mut sender = Sender::new(
+            Source::Slice {
+                data: data.to_vec(),
+                pos: 0,
+            },
+            self.options.mode,
+        );
+        do_put(&self.options, self.server, remote, &mut sender, Some(len)).await
+    }
+}
+
+/// Fluent builder for [`Client`]. Every setter returns `self`, so the
+/// caller chains them and finishes with `.build(server)`.
+#[derive(Clone, Debug, Default)]
+pub struct ClientBuilder {
+    options: Options,
+}
+
+impl ClientBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn mode(mut self, m: Mode) -> Self {
+        self.options.mode = m;
+        self
+    }
+
+    pub fn blksize(mut self, n: u16) -> Self {
+        self.options.blksize = Some(n);
+        self
+    }
+
+    /// Local per-packet retransmit timeout. The wire-level `timeout`
+    /// option is set separately via [`Self::negotiate_timeout`].
+    pub fn timeout(mut self, d: Duration) -> Self {
+        self.options.timeout = d;
+        self
+    }
+
+    /// Request the server use this per-packet timeout (RFC 2349).
+    pub fn negotiate_timeout(mut self, secs: u8) -> Self {
+        self.options.timeout_secs = Some(secs);
+        self
+    }
+
+    pub fn windowsize(mut self, n: u16) -> Self {
+        self.options.windowsize = Some(n);
+        self
+    }
+
+    pub fn request_tsize(mut self, yes: bool) -> Self {
+        self.options.request_tsize = yes;
+        self
+    }
+
+    pub fn retries(mut self, n: u32) -> Self {
+        self.options.retries = n;
+        self
+    }
+
+    pub fn build(self, server: SocketAddr) -> Client {
+        Client {
+            server,
+            options: self.options,
         }
     }
 }
@@ -103,13 +240,11 @@ async fn bind_local(server: SocketAddr) -> Result<UdpSocket> {
     Ok(UdpSocket::bind(bind_addr).await?)
 }
 
-/// Download `remote` from `server` and write to `local`. Returns the
-/// total number of bytes written to disk (after any netascii decode).
-pub async fn get(
+async fn do_get(
+    opts: &Options,
     server: SocketAddr,
     remote: &str,
-    local: &Path,
-    opts: &Options,
+    writer: &mut Receiver,
 ) -> Result<u64> {
     let sock = bind_local(server).await?;
     let request_options = build_request_options(opts, None);
@@ -121,7 +256,6 @@ pub async fn get(
 
     info!(%server, file = %remote, %opts.mode, "RRQ");
 
-    // We don't know the server's per-transfer TID until the first reply.
     let mut req_buf = BytesMut::new();
     encode_into(&request, &mut req_buf);
 
@@ -168,12 +302,6 @@ pub async fn get(
     }
 
     let peer = peer.ok_or(Error::Timeout(opts.retries))?;
-
-    // Phase 2: receive DATA loop (windowsize-aware).
-    let mut writer = match opts.mode {
-        Mode::NetAscii => Receiver::new_netascii(local).await?,
-        Mode::Octet => Receiver::new_octet(local).await?,
-    };
 
     let mut next_block: u16 = 1;
     let mut blocks_in_window: u16 = 0;
@@ -246,18 +374,15 @@ pub async fn get(
     Ok(writer.bytes_written())
 }
 
-/// Upload `local` to `remote` on `server`. Returns the number of bytes
-/// transferred (post-netascii encoded for netascii mode).
-pub async fn put(
+async fn do_put(
+    opts: &Options,
     server: SocketAddr,
     remote: &str,
-    local: &Path,
-    opts: &Options,
+    sender: &mut Sender,
+    source_len: Option<u64>,
 ) -> Result<u64> {
-    let file = File::open(local).await?;
-    let file_size = file.metadata().await?.len();
     let sock = bind_local(server).await?;
-    let request_options = build_request_options(opts, Some(file_size));
+    let request_options = build_request_options(opts, source_len);
     let request = Packet::Wrq {
         filename: remote.to_owned(),
         mode: opts.mode,
@@ -306,15 +431,14 @@ pub async fn put(
 
     let peer = peer.ok_or(Error::Timeout(opts.retries))?;
 
-    // DATA-send loop.
-    let mut sender = Sender::new(file, opts.mode, neg.blksize as usize);
+    sender.set_blksize(neg.blksize as usize);
+
     let mut next_block: u16 = 1;
     let mut in_flight: VecDeque<(u16, Vec<u8>)> = VecDeque::new();
     let mut last_sent_short = false;
     let mut total: u64 = 0;
 
     loop {
-        // Refill window.
         while in_flight.len() < neg.windowsize as usize && !last_sent_short {
             match sender.next_block().await? {
                 Some(block) => {
@@ -334,7 +458,6 @@ pub async fn put(
 
         let mut attempt = 0u32;
         loop {
-            // Send all in-flight blocks.
             for (bn, data) in &in_flight {
                 let mut buf = BytesMut::with_capacity(data.len() + 4);
                 encode_into(
@@ -431,10 +554,16 @@ async fn recv_one(
     }
 }
 
-/// Disk -> network, used by `put`. Reads source bytes (with optional
-/// netascii encode) and emits at most one DATA block per call.
+/// Source of bytes for a `put`. The Slice variant copies once at
+/// construction so the future is `'static` regardless of the caller's
+/// borrow lifetime.
+enum Source {
+    File(File),
+    Slice { data: Vec<u8>, pos: usize },
+}
+
 struct Sender {
-    file: File,
+    source: Source,
     encoder: Option<ToWire>,
     pending: Vec<u8>,
     blksize: usize,
@@ -443,14 +572,34 @@ struct Sender {
 }
 
 impl Sender {
-    fn new(file: File, mode: Mode, blksize: usize) -> Self {
+    fn new(source: Source, mode: Mode) -> Self {
         Self {
-            file,
+            source,
             encoder: matches!(mode, Mode::NetAscii).then(ToWire::new),
-            pending: Vec::with_capacity(blksize * 2),
-            blksize,
+            pending: Vec::new(),
+            // Set later via set_blksize once the OACK/ACK has settled
+            // the negotiated value.
+            blksize: 0,
             eof: false,
             final_emitted: false,
+        }
+    }
+
+    fn set_blksize(&mut self, blksize: usize) {
+        self.blksize = blksize;
+        self.pending.reserve(blksize * 2);
+    }
+
+    async fn read_chunk(&mut self, chunk: &mut [u8]) -> Result<usize> {
+        match &mut self.source {
+            Source::File(f) => Ok(f.read(chunk).await?),
+            Source::Slice { data, pos } => {
+                let remaining = &data[*pos..];
+                let n = remaining.len().min(chunk.len());
+                chunk[..n].copy_from_slice(&remaining[..n]);
+                *pos += n;
+                Ok(n)
+            }
         }
     }
 
@@ -460,7 +609,7 @@ impl Sender {
         }
         let mut chunk = vec![0u8; self.blksize];
         while self.pending.len() < self.blksize && !self.eof {
-            let n = self.file.read(&mut chunk).await?;
+            let n = self.read_chunk(&mut chunk).await?;
             if n == 0 {
                 self.eof = true;
                 break;
@@ -485,16 +634,20 @@ impl Sender {
     }
 }
 
-/// Network -> disk, used by `get`. Either raw octet writes or
-/// streaming netascii decode.
+/// Destination for received bytes.
+enum Sink {
+    File(File),
+    Vec(Vec<u8>),
+}
+
 struct Receiver {
-    file: File,
+    sink: Sink,
     decoder: Option<FromWire>,
     bytes: u64,
 }
 
 impl Receiver {
-    async fn new_octet(local: &Path) -> Result<Self> {
+    async fn new_file(local: &Path, mode: Mode) -> Result<Self> {
         let file = OpenOptions::new()
             .write(true)
             .create(true)
@@ -502,31 +655,36 @@ impl Receiver {
             .open(local)
             .await?;
         Ok(Self {
-            file,
-            decoder: None,
+            sink: Sink::File(file),
+            decoder: matches!(mode, Mode::NetAscii).then(FromWire::new),
             bytes: 0,
         })
     }
 
-    async fn new_netascii(local: &Path) -> Result<Self> {
-        let mut s = Self::new_octet(local).await?;
-        s.decoder = Some(FromWire::new());
-        Ok(s)
+    fn new_vec(mode: Mode) -> Self {
+        Self {
+            sink: Sink::Vec(Vec::new()),
+            decoder: matches!(mode, Mode::NetAscii).then(FromWire::new),
+            bytes: 0,
+        }
     }
 
     async fn write_block(&mut self, data: &[u8]) -> Result<()> {
-        match &mut self.decoder {
-            Some(d) => {
-                let mut out = Vec::with_capacity(data.len());
-                d.translate(data, &mut out);
-                self.file.write_all(&out).await?;
-                self.bytes += out.len() as u64;
-            }
-            None => {
-                self.file.write_all(data).await?;
-                self.bytes += data.len() as u64;
-            }
+        if let Some(d) = &mut self.decoder {
+            let mut out = Vec::with_capacity(data.len());
+            d.translate(data, &mut out);
+            self.write_raw(&out).await
+        } else {
+            self.write_raw(data).await
         }
+    }
+
+    async fn write_raw(&mut self, buf: &[u8]) -> Result<()> {
+        match &mut self.sink {
+            Sink::File(f) => f.write_all(buf).await?,
+            Sink::Vec(v) => v.extend_from_slice(buf),
+        }
+        self.bytes += buf.len() as u64;
         Ok(())
     }
 
@@ -535,22 +693,34 @@ impl Receiver {
             let mut tail = Vec::new();
             d.finish(&mut tail);
             if !tail.is_empty() {
-                self.file.write_all(&tail).await?;
-                self.bytes += tail.len() as u64;
+                self.write_raw(&tail).await?;
             }
         }
-        self.file.flush().await?;
+        if let Sink::File(f) = &mut self.sink {
+            f.flush().await?;
+        }
         Ok(())
     }
 
     fn bytes_written(&self) -> u64 {
         self.bytes
     }
+
+    fn into_vec(self) -> Vec<u8> {
+        match self.sink {
+            Sink::Vec(v) => v,
+            Sink::File(_) => unreachable!("into_vec called on file-backed Receiver"),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn addr() -> SocketAddr {
+        "127.0.0.1:0".parse().unwrap()
+    }
 
     #[test]
     fn build_request_options_round_trip() {
@@ -576,5 +746,56 @@ mod tests {
         let merged = merge_oack(initial, &oack);
         assert_eq!(merged.blksize, 1428);
         assert_eq!(merged.windowsize, DEFAULT_WINDOW_SIZE);
+    }
+
+    #[test]
+    fn builder_defaults_match_options_default() {
+        let client = Client::builder().build(addr());
+        let defaults = Options::default();
+        assert_eq!(client.options().mode, defaults.mode);
+        assert_eq!(client.options().blksize, defaults.blksize);
+        assert_eq!(client.options().timeout_secs, defaults.timeout_secs);
+        assert_eq!(client.options().windowsize, defaults.windowsize);
+        assert_eq!(client.options().request_tsize, defaults.request_tsize);
+        assert_eq!(client.options().retries, defaults.retries);
+        assert_eq!(client.options().timeout, defaults.timeout);
+    }
+
+    #[test]
+    fn builder_setters_wire_through() {
+        let client = Client::builder()
+            .mode(Mode::NetAscii)
+            .blksize(1428)
+            .negotiate_timeout(7)
+            .windowsize(16)
+            .request_tsize(true)
+            .retries(10)
+            .timeout(Duration::from_millis(250))
+            .build(addr());
+        let o = client.options();
+        assert_eq!(o.mode, Mode::NetAscii);
+        assert_eq!(o.blksize, Some(1428));
+        assert_eq!(o.timeout_secs, Some(7));
+        assert_eq!(o.windowsize, Some(16));
+        assert!(o.request_tsize);
+        assert_eq!(o.retries, 10);
+        assert_eq!(o.timeout, Duration::from_millis(250));
+    }
+
+    #[test]
+    fn options_mut_allows_post_construction_edit() {
+        let mut client = Client::new(addr());
+        client.options_mut().blksize = Some(8192);
+        assert_eq!(client.options().blksize, Some(8192));
+    }
+
+    #[test]
+    fn with_options_preserves_caller_struct() {
+        let opts = Options {
+            blksize: Some(512),
+            ..Options::default()
+        };
+        let client = Client::with_options(addr(), opts);
+        assert_eq!(client.options().blksize, Some(512));
     }
 }

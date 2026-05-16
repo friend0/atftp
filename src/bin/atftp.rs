@@ -6,15 +6,11 @@ use anyhow::{Context, anyhow};
 use clap::{Parser, Subcommand, ValueEnum};
 use tracing_subscriber::EnvFilter;
 
-use atftp::client::{self, Options};
+use atftp::client::Client;
 use atftp::proto::Mode;
 
 #[derive(Parser, Debug)]
-#[command(
-    name = "atftp",
-    version,
-    about = "TFTP client (Rust clone of atftp)"
-)]
+#[command(name = "atftp", version, about = "TFTP client (Rust clone of atftp)")]
 struct Args {
     /// Server host[:port]. Port defaults to 69 if omitted.
     server: String,
@@ -123,38 +119,35 @@ async fn main() -> anyhow::Result<()> {
     init_tracing(args.verbose);
     let server = resolve_server(&args.server)?;
 
-    let mode: Mode = args.mode.into();
+    // PUT always knows the source size locally, so tsize negotiation is
+    // free and lets servers reject oversized uploads up front.
+    let want_tsize = args.tsize || matches!(args.cmd, Cmd::Put { .. });
+
+    let mut builder = Client::builder()
+        .mode(args.mode.into())
+        .retries(args.retries)
+        .timeout(Duration::from_secs(args.timeout as u64))
+        .request_tsize(want_tsize);
+    if let Some(n) = args.blksize {
+        builder = builder.blksize(n);
+    }
+    if let Some(n) = args.tftp_timeout {
+        builder = builder.negotiate_timeout(n);
+    }
+    if let Some(n) = args.windowsize {
+        builder = builder.windowsize(n);
+    }
+    let client = builder.build(server);
 
     match args.cmd {
         Cmd::Get { remote, local } => {
             let local = local.unwrap_or_else(|| default_local_for(&remote));
-            let opts = Options {
-                mode,
-                blksize: args.blksize,
-                timeout_secs: args.tftp_timeout,
-                windowsize: args.windowsize,
-                request_tsize: args.tsize,
-                retries: args.retries,
-                timeout: Duration::from_secs(args.timeout as u64),
-            };
-            let bytes = client::get(server, &remote, &local, &opts).await?;
+            let bytes = client.get(&remote, &local).await?;
             tracing::info!(%bytes, "get complete");
         }
         Cmd::Put { remote, local } => {
             let local = local.unwrap_or_else(|| default_local_for(&remote));
-            let opts = Options {
-                mode,
-                blksize: args.blksize,
-                timeout_secs: args.tftp_timeout,
-                windowsize: args.windowsize,
-                // PUT always knows the file size locally, so requesting
-                // tsize is harmless and lets servers reject too-large
-                // uploads up front.
-                request_tsize: true,
-                retries: args.retries,
-                timeout: Duration::from_secs(args.timeout as u64),
-            };
-            let bytes = client::put(server, &remote, &local, &opts).await?;
+            let bytes = client.put(&remote, &local).await?;
             tracing::info!(%bytes, "put complete");
         }
     }
