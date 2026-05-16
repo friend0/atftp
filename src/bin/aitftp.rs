@@ -6,11 +6,11 @@ use anyhow::{Context, anyhow};
 use clap::{Parser, Subcommand, ValueEnum};
 use tracing_subscriber::EnvFilter;
 
-use atftp::client::Client;
-use atftp::proto::Mode;
+use aitftp::client::Client;
+use aitftp::proto::Mode;
 
 #[derive(Parser, Debug)]
-#[command(name = "atftp", version, about = "TFTP client (Rust clone of atftp)")]
+#[command(name = "aitftp", version, about = "TFTP client (Rust clone of atftp)")]
 struct Args {
     /// Server host[:port]. Port defaults to 69 if omitted.
     server: String,
@@ -88,10 +88,10 @@ impl From<ModeArg> for Mode {
 
 fn init_tracing(verbose: u8) {
     let default = match verbose {
-        0 => "atftp=warn",
-        1 => "atftp=info",
-        2 => "atftp=debug",
-        _ => "atftp=trace",
+        0 => "aitftp=warn",
+        1 => "aitftp=info",
+        2 => "aitftp=debug",
+        _ => "aitftp=trace",
     };
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default));
     tracing_subscriber::fmt().with_env_filter(filter).init();

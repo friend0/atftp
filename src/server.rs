@@ -158,7 +158,7 @@ impl Server {
         info!(
             listen = %self.local_addr,
             root = %self.cfg.root.display(),
-            "atftpd listening"
+            "aitftpd listening"
         );
         let listener = self.listener;
         let cfg = self.cfg;

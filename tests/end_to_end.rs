@@ -5,10 +5,10 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use atftp::client::{Client, Options};
-use atftp::error::Error;
-use atftp::proto::Mode;
-use atftp::server::{Config, Server};
+use aitftp::client::{Client, Options};
+use aitftp::error::Error;
+use aitftp::proto::Mode;
+use aitftp::server::{Config, Server};
 use tokio::time::timeout;
 
 /// Spawn a server on an ephemeral port and return its bound addr plus
@@ -142,7 +142,7 @@ async fn rrq_file_not_found_surfaces_peer_error() {
         .unwrap_err();
     match err {
         Error::Peer { code, .. } => {
-            assert_eq!(code, atftp::proto::ErrorCode::FileNotFound);
+            assert_eq!(code, aitftp::proto::ErrorCode::FileNotFound);
         }
         other => panic!("expected Peer error, got {other:?}"),
     }
@@ -166,7 +166,7 @@ async fn rrq_path_traversal_rejected() {
     assert!(matches!(
         err,
         Error::Peer {
-            code: atftp::proto::ErrorCode::AccessViolation,
+            code: aitftp::proto::ErrorCode::AccessViolation,
             ..
         }
     ));
@@ -214,7 +214,7 @@ async fn wrq_refuses_overwrite_by_default() {
     assert!(matches!(
         err,
         Error::Peer {
-            code: atftp::proto::ErrorCode::FileExists,
+            code: aitftp::proto::ErrorCode::FileExists,
             ..
         }
     ));

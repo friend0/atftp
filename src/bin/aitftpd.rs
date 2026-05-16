@@ -6,12 +6,12 @@ use anyhow::Context;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
-use atftp::proto::MAX_BLOCK_SIZE;
-use atftp::server::Server;
+use aitftp::proto::MAX_BLOCK_SIZE;
+use aitftp::server::Server;
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "atftpd",
+    name = "aitftpd",
     version,
     about = "TFTP server (Rust clone of atftpd)",
     disable_help_subcommand = true
@@ -53,10 +53,10 @@ struct Args {
 
 fn init_tracing(verbose: u8) {
     let default = match verbose {
-        0 => "atftp=warn",
-        1 => "atftp=info",
-        2 => "atftp=debug",
-        _ => "atftp=trace",
+        0 => "aitftp=warn",
+        1 => "aitftp=info",
+        2 => "aitftp=debug",
+        _ => "aitftp=trace",
     };
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default));
     tracing_subscriber::fmt().with_env_filter(filter).init();
@@ -82,7 +82,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(
         listen = %server.local_addr(),
         root = %server.root().display(),
-        "atftpd ready"
+        "aitftpd ready"
     );
 
     let shutdown = async {

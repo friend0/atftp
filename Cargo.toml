@@ -1,21 +1,21 @@
 [package]
-name = "atftp"
+name = "aitftp"
 version = "0.1.0"
 edition = "2021"
 description = "Rust clone of atftp — Advanced TFTP client and server"
-license = "GPL-2.0-or-later"
+license = "MIT"
 
 [lib]
-name = "atftp"
+name = "aitftp"
 path = "src/lib.rs"
 
 [[bin]]
-name = "atftp"
-path = "src/bin/atftp.rs"
+name = "aitftp"
+path = "src/bin/aitftp.rs"
 
 [[bin]]
-name = "atftpd"
-path = "src/bin/atftpd.rs"
+name = "aitftpd"
+path = "src/bin/aitftpd.rs"
 
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "io-util", "time", "sync", "signal"] }
