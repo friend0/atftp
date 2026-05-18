@@ -5,31 +5,22 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use atftp::client::{self, Options};
-use atftp::error::Error;
-use atftp::proto::Mode;
-use atftp::server::{Config, Server};
-use tokio::net::UdpSocket;
+use aitftp::client::{Client, Options};
+use aitftp::error::Error;
+use aitftp::proto::Mode;
+use aitftp::server::{Config, Server};
 use tokio::time::timeout;
 
 /// Spawn a server on an ephemeral port and return its bound addr plus
 /// a handle the test can use to keep the task alive (drop = abort).
 async fn spawn_server(root: PathBuf, mut cfg: Config) -> (SocketAddr, tokio::task::JoinHandle<()>) {
-    // Bind a probe socket to claim a port, then immediately drop it so
-    // the server can re-bind. There's a tiny race window but it has
-    // never bitten in practice for these short-lived tests.
-    let probe = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let addr = probe.local_addr().unwrap();
-    drop(probe);
-
-    cfg.listen = addr;
+    cfg.listen = "127.0.0.1:0".parse().unwrap();
     cfg.root = root;
-    let server = Server::new(cfg);
+    let server = Server::bind(cfg).await.unwrap();
+    let addr = server.local_addr();
     let handle = tokio::spawn(async move {
         let _ = server.run().await;
     });
-    // Give the server a moment to actually bind before clients try.
-    tokio::time::sleep(Duration::from_millis(50)).await;
     (addr, handle)
 }
 
@@ -47,6 +38,10 @@ fn base_opts() -> Options {
         retries: 3,
         ..Options::default()
     }
+}
+
+fn client_with(addr: SocketAddr, opts: Options) -> Client {
+    Client::with_options(addr, opts)
 }
 
 async fn write_file(path: &std::path::Path, data: &[u8]) {
@@ -69,13 +64,11 @@ async fn rrq_octet_small_no_options() {
 
     let (addr, _server) = spawn_server(server_root.clone(), base_cfg()).await;
     let dest = client_dir.join("hi.txt");
-    let n = timeout(
-        Duration::from_secs(5),
-        client::get(addr, "hi.txt", &dest, &base_opts()),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let client = client_with(addr, base_opts());
+    let n = timeout(Duration::from_secs(5), client.get("hi.txt", &dest))
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(n as usize, payload.len());
     assert_eq!(read_file(&dest).await, payload);
 }
@@ -93,13 +86,11 @@ async fn rrq_octet_exact_block_boundary() {
 
     let (addr, _server) = spawn_server(server_root.clone(), base_cfg()).await;
     let dest = client_dir.join("blk.bin");
-    let n = timeout(
-        Duration::from_secs(5),
-        client::get(addr, "blk.bin", &dest, &base_opts()),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let client = client_with(addr, base_opts());
+    let n = timeout(Duration::from_secs(5), client.get("blk.bin", &dest))
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(n as usize, payload.len());
     assert_eq!(read_file(&dest).await, payload);
 }
@@ -121,19 +112,17 @@ async fn rrq_octet_large_with_options() {
 
     let (addr, _server) = spawn_server(server_root.clone(), base_cfg()).await;
     let dest = client_dir.join("big.bin");
-    let opts = Options {
-        blksize: Some(1428),
-        windowsize: Some(8),
-        request_tsize: true,
-        ..base_opts()
-    };
-    let n = timeout(
-        Duration::from_secs(15),
-        client::get(addr, "big.bin", &dest, &opts),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let client = Client::builder()
+        .blksize(1428)
+        .windowsize(8)
+        .request_tsize(true)
+        .timeout(Duration::from_millis(500))
+        .retries(3)
+        .build(addr);
+    let n = timeout(Duration::from_secs(15), client.get("big.bin", &dest))
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(n as usize, payload.len());
     assert_eq!(read_file(&dest).await, payload);
 }
@@ -146,16 +135,14 @@ async fn rrq_file_not_found_surfaces_peer_error() {
     let (addr, _server) = spawn_server(server_root, base_cfg()).await;
 
     let dest = dir.path().join("won't-exist");
-    let err = timeout(
-        Duration::from_secs(5),
-        client::get(addr, "missing.bin", &dest, &base_opts()),
-    )
-    .await
-    .unwrap()
-    .unwrap_err();
+    let client = client_with(addr, base_opts());
+    let err = timeout(Duration::from_secs(5), client.get("missing.bin", &dest))
+        .await
+        .unwrap()
+        .unwrap_err();
     match err {
         Error::Peer { code, .. } => {
-            assert_eq!(code, atftp::proto::ErrorCode::FileNotFound);
+            assert_eq!(code, aitftp::proto::ErrorCode::FileNotFound);
         }
         other => panic!("expected Peer error, got {other:?}"),
     }
@@ -171,17 +158,15 @@ async fn rrq_path_traversal_rejected() {
     let (addr, _server) = spawn_server(server_root, base_cfg()).await;
 
     let dest = dir.path().join("stolen.txt");
-    let err = timeout(
-        Duration::from_secs(5),
-        client::get(addr, "../secret.txt", &dest, &base_opts()),
-    )
-    .await
-    .unwrap()
-    .unwrap_err();
+    let client = client_with(addr, base_opts());
+    let err = timeout(Duration::from_secs(5), client.get("../secret.txt", &dest))
+        .await
+        .unwrap()
+        .unwrap_err();
     assert!(matches!(
         err,
         Error::Peer {
-            code: atftp::proto::ErrorCode::AccessViolation,
+            code: aitftp::proto::ErrorCode::AccessViolation,
             ..
         }
     ));
@@ -199,14 +184,11 @@ async fn wrq_octet_small() {
     write_file(&src, payload).await;
 
     let (addr, _server) = spawn_server(server_root.clone(), base_cfg()).await;
-    let opts = base_opts();
-    let n = timeout(
-        Duration::from_secs(5),
-        client::put(addr, "up.bin", &src, &opts),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let client = client_with(addr, base_opts());
+    let n = timeout(Duration::from_secs(5), client.put("up.bin", &src))
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(n as usize, payload.len());
     let landed = read_file(&server_root.join("up.bin")).await;
     assert_eq!(landed, payload);
@@ -224,17 +206,15 @@ async fn wrq_refuses_overwrite_by_default() {
     write_file(&src, b"replacement").await;
 
     let (addr, _server) = spawn_server(server_root.clone(), base_cfg()).await;
-    let err = timeout(
-        Duration::from_secs(5),
-        client::put(addr, "exists.bin", &src, &base_opts()),
-    )
-    .await
-    .unwrap()
-    .unwrap_err();
+    let client = client_with(addr, base_opts());
+    let err = timeout(Duration::from_secs(5), client.put("exists.bin", &src))
+        .await
+        .unwrap()
+        .unwrap_err();
     assert!(matches!(
         err,
         Error::Peer {
-            code: atftp::proto::ErrorCode::FileExists,
+            code: aitftp::proto::ErrorCode::FileExists,
             ..
         }
     ));
@@ -260,13 +240,11 @@ async fn wrq_overwrite_when_allowed() {
         ..base_cfg()
     };
     let (addr, _server) = spawn_server(server_root.clone(), cfg).await;
-    timeout(
-        Duration::from_secs(5),
-        client::put(addr, "exists.bin", &src, &base_opts()),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let client = client_with(addr, base_opts());
+    timeout(Duration::from_secs(5), client.put("exists.bin", &src))
+        .await
+        .unwrap()
+        .unwrap();
     let on_disk = read_file(&server_root.join("exists.bin")).await;
     assert_eq!(on_disk, payload);
 }
@@ -289,23 +267,21 @@ async fn netascii_round_trip() {
         mode: Mode::NetAscii,
         ..base_opts()
     };
+    let client = client_with(addr, opts);
 
     timeout(
         Duration::from_secs(5),
-        client::put(addr, "notes.txt", &client_dir.join("notes.txt"), &opts),
+        client.put("notes.txt", &client_dir.join("notes.txt")),
     )
     .await
     .unwrap()
     .unwrap();
 
     let dest = client_dir.join("notes-roundtrip.txt");
-    timeout(
-        Duration::from_secs(5),
-        client::get(addr, "notes.txt", &dest, &opts),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    timeout(Duration::from_secs(5), client.get("notes.txt", &dest))
+        .await
+        .unwrap()
+        .unwrap();
 
     assert_eq!(read_file(&dest).await, text);
 }
@@ -328,12 +304,88 @@ async fn rrq_with_windowsize_only() {
         windowsize: Some(4),
         ..base_opts()
     };
-    timeout(
+    let client = client_with(addr, opts);
+    timeout(Duration::from_secs(5), client.get("w.bin", &dest))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(read_file(&dest).await, payload);
+}
+
+#[tokio::test]
+async fn graceful_shutdown_via_run_until() {
+    // run_until should return promptly once the shutdown future resolves.
+    let dir = tempfile::tempdir().unwrap();
+    let server_root = dir.path().join("srv");
+    tokio::fs::create_dir(&server_root).await.unwrap();
+    let mut cfg = base_cfg();
+    cfg.listen = "127.0.0.1:0".parse().unwrap();
+    cfg.root = server_root;
+    let server = Server::bind(cfg).await.unwrap();
+    let addr = server.local_addr();
+
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let join = tokio::spawn(async move {
+        server
+            .run_until(async {
+                let _ = rx.await;
+            })
+            .await
+    });
+
+    // Sanity-check the server actually listens: a quick get on a
+    // nonexistent file should round-trip as FileNotFound, proving the
+    // listener is alive before we signal shutdown.
+    let client = client_with(addr, base_opts());
+    let dest = dir.path().join("nope");
+    let err = timeout(Duration::from_secs(2), client.get("nope.bin", &dest))
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert!(matches!(err, Error::Peer { .. }));
+
+    // Signal shutdown and confirm the task exits cleanly.
+    tx.send(()).unwrap();
+    let result = timeout(Duration::from_secs(2), join)
+        .await
+        .expect("server didn't shut down in time")
+        .expect("join failed");
+    result.expect("run_until returned an error");
+}
+
+#[tokio::test]
+async fn bytes_round_trip_in_memory() {
+    // Library-user flavor: put_bytes / get_to_vec without touching disk.
+    let dir = tempfile::tempdir().unwrap();
+    let server_root = dir.path().join("srv");
+    tokio::fs::create_dir(&server_root).await.unwrap();
+    let cfg = Config {
+        allow_overwrite: true,
+        ..base_cfg()
+    };
+    let (addr, _server) = spawn_server(server_root.clone(), cfg).await;
+
+    let payload: Vec<u8> = (0..5000u32).map(|i| (i & 0xff) as u8).collect();
+    let client = Client::builder()
+        .blksize(1024)
+        .windowsize(4)
+        .request_tsize(true)
+        .timeout(Duration::from_millis(500))
+        .retries(3)
+        .build(addr);
+
+    let sent = timeout(
         Duration::from_secs(5),
-        client::get(addr, "w.bin", &dest, &opts),
+        client.put_bytes("mem.bin", &payload),
     )
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(read_file(&dest).await, payload);
+    assert_eq!(sent as usize, payload.len());
+
+    let got = timeout(Duration::from_secs(5), client.get_to_vec("mem.bin"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(got, payload);
 }
