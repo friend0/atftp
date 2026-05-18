@@ -1,9 +1,13 @@
-# atftp
+# aitftp
 
 A Rust implementation of the Trivial File Transfer Protocol (TFTP) — a
 clean-room rewrite of [madmartin/atftp][upstream], the C reference
-client and server. It ships two binaries (`atftp`, `atftpd`) plus a
+client and server. It ships two binaries (`aitftp`, `aitftpd`) plus a
 library that lets you embed either side in your own async Rust code.
+
+The `ai-` prefix nods to its origin (a Claude-assisted port) and keeps
+the binary names from colliding with upstream `atftp` / `atftpd` on the
+same `$PATH`.
 
 [upstream]: https://github.com/madmartin/atftp
 
@@ -53,8 +57,8 @@ cargo build --release
 
 That produces:
 
-- `target/release/atftp`  — the client
-- `target/release/atftpd` — the server
+- `target/release/aitftp`  — the client
+- `target/release/aitftpd` — the server
 
 The crate is a single Cargo package with one library and two `[[bin]]`
 targets; everything you need is in `Cargo.toml`.
@@ -64,11 +68,11 @@ targets; everything you need is in `Cargo.toml`.
 ### Server
 
 ```
-atftpd --listen 0.0.0.0:69 --root /srv/tftp
+aitftpd --listen 0.0.0.0:69 --root /srv/tftp
 
 # Common variations
-atftpd --listen 127.0.0.1:6969 --root ./files --allow-overwrite -v
-atftpd --listen 0.0.0.0:69 --root /srv/tftp --no-windowsize --max-block-size 1428
+aitftpd --listen 127.0.0.1:6969 --root ./files --allow-overwrite -v
+aitftpd --listen 0.0.0.0:69 --root /srv/tftp --no-windowsize --max-block-size 1428
 ```
 
 Flags:
@@ -91,13 +95,13 @@ own sockets.
 
 ```
 # Download
-atftp 192.168.1.1 get vmlinuz -l ./vmlinuz
+aitftp 192.168.1.1 get vmlinuz -l ./vmlinuz
 
 # Upload
-atftp 192.168.1.1 put config.bin -l ./config.bin
+aitftp 192.168.1.1 put config.bin -l ./config.bin
 
 # With negotiated options
-atftp 192.168.1.1 --blksize 1428 --windowsize 8 --tsize get image.img
+aitftp 192.168.1.1 --blksize 1428 --windowsize 8 --tsize get image.img
 ```
 
 Host accepts `host` or `host:port` (defaults to port 69). Subcommands
@@ -112,8 +116,8 @@ tokio application.
 ### Client
 
 ```rust
-use atftp::client::Client;
-use atftp::proto::Mode;
+use aitftp::client::Client;
+use aitftp::proto::Mode;
 use std::time::Duration;
 
 let addr = "192.168.1.1:69".parse().unwrap();
@@ -146,7 +150,7 @@ socket, so one client can drive many concurrent transfers.
 ### Server
 
 ```rust
-use atftp::server::Server;
+use aitftp::server::Server;
 use std::time::Duration;
 
 let server = Server::builder()
@@ -203,6 +207,4 @@ If you need any of them, open an issue.
 
 ## License
 
-MIT — see [LICENSE](LICENSE). The upstream `atftp` project is
-GPL-2.0-or-later; since this is a clean-room reimplementation that
-copied no GPL code, the lighter license is unencumbered.
+MIT — see [LICENSE](LICENSE).
