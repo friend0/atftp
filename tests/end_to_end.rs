@@ -144,7 +144,7 @@ async fn rrq_file_not_found_surfaces_peer_error() {
         Error::Peer { code, .. } => {
             assert_eq!(code, aitftp::proto::ErrorCode::FileNotFound);
         }
-        other => panic!("expected Peer error, got {other:?}"),
+        other => panic!("expected Peer error, got {:?}", other),
     }
 }
 
