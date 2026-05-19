@@ -1,9 +1,12 @@
 [package]
 name = "aitftp"
 version = "0.1.0"
-edition = "2018"
+edition = "2021"
 description = "Rust clone of atftp — Advanced TFTP client and server"
 license = "MIT"
+
+[workspace]
+resolver = "3"
 
 [lib]
 name = "aitftp"
