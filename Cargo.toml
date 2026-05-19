@@ -20,7 +20,7 @@ path = "src/bin/aitftpd.rs"
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "io-util", "time", "sync", "signal"] }
 bytes = "1"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4.5.20", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "1"
