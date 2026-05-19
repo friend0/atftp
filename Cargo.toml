@@ -1,7 +1,7 @@
 [package]
 name = "aitftp"
 version = "0.1.0"
-edition = "2021"
+edition = "2018"
 description = "Rust clone of atftp — Advanced TFTP client and server"
 license = "MIT"
 
@@ -18,7 +18,16 @@ name = "aitftpd"
 path = "src/bin/aitftpd.rs"
 
 [dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "io-util", "time", "sync", "signal"] }
+tokio = { version = "1", features = [
+  "rt-multi-thread",
+  "macros",
+  "net",
+  "fs",
+  "io-util",
+  "time",
+  "sync",
+  "signal",
+] }
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
