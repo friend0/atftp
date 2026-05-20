@@ -6,9 +6,6 @@ rust-version = "1.81"
 description = "Rust clone of atftp — Advanced TFTP client and server"
 license = "MIT"
 
-[workspace]
-resolver = "3"
-
 [lib]
 name = "aitftp"
 path = "src/lib.rs"
