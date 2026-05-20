@@ -6,9 +6,6 @@ rust-version = "1.81"
 description = "Rust clone of atftp — Advanced TFTP client and server"
 license = "MIT"
 
-[workspace]
-resolver = "3"
-
 [lib]
 name = "aitftp"
 path = "src/lib.rs"
@@ -33,7 +30,7 @@ tokio = { version = "1", features = [
   "signal",
 ] }
 bytes = "1"
-clap = { version = "4.5.20", features = ["derive"] }
+clap = { version = "~4.5", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "1"
